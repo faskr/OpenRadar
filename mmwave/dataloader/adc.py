@@ -44,10 +44,10 @@ CONFIG_STATUS = '0000'
 CONFIG_FOOTER = 'aaee'
 ADC_PARAMS = {'chirps': 128,  # 32
               'rx': 4,
-              'tx': 3,
-              'samples': 128,
-              'IQ': 2,
-              'bytes': 2}
+              'tx': 1,
+              'samples': 256, #16384, # <- continuous stream
+              'IQ': 1,
+              'bytes': 4}
 # STATIC
 MAX_PACKET_SIZE = 4096
 BYTES_IN_PACKET = 1456
@@ -98,20 +98,6 @@ class DCA1000:
         self.cfg_recv = (static_ip, config_port)
         self.data_recv = (static_ip, data_port)
 
-        # Create sockets
-        self.config_socket = socket.socket(socket.AF_INET,
-                                           socket.SOCK_DGRAM,
-                                           socket.IPPROTO_UDP)
-        self.data_socket = socket.socket(socket.AF_INET,
-                                         socket.SOCK_DGRAM,
-                                         socket.IPPROTO_UDP)
-
-        # Bind data socket to fpga
-        self.data_socket.bind(self.data_recv)
-
-        # Bind config socket to fpga
-        self.config_socket.bind(self.cfg_recv)
-
         self.data = []
         self.packet_count = []
         self.byte_count = []
@@ -130,6 +116,14 @@ class DCA1000:
             None
 
         """
+        # Create socket
+        self.config_socket = socket.socket(socket.AF_INET,
+                                           socket.SOCK_DGRAM,
+                                           socket.IPPROTO_UDP)
+
+        # Bind config socket to fpga
+        self.config_socket.bind(self.cfg_recv)
+
         # SYSTEM_CONNECT_CMD_CODE
         # 5a a5 09 00 00 00 aa ee
         print(self._send_command(CMD.SYSTEM_CONNECT_CMD_CODE))
@@ -140,20 +134,12 @@ class DCA1000:
 
         # CONFIG_FPGA_GEN_CMD_CODE
         # 5a a5 03 00 06 00 01 02 01 02 03 1e aa ee
-        print(self._send_command(CMD.CONFIG_FPGA_GEN_CMD_CODE, '0600', 'c005350c0000'))
+        print(self._send_command(CMD.CONFIG_FPGA_GEN_CMD_CODE, '0600', '01010102031e'))# 'c005350c0000'))
 
         # CONFIG_PACKET_DATA_CMD_CODE 
         # 5a a5 0b 00 06 00 c0 05 35 0c 00 00 aa ee
         print(self._send_command(CMD.CONFIG_PACKET_DATA_CMD_CODE, '0600', 'c005350c0000'))
 
-    def close(self):
-        """Closes the sockets that are used for receiving and sending data
-
-        Returns:
-            None
-
-        """
-        self.data_socket.close()
         self.config_socket.close()
 
     def read(self, timeout=1):
@@ -166,6 +152,14 @@ class DCA1000:
             Full frame as array if successful, else None
 
         """
+        # Create socket
+        self.data_socket = socket.socket(socket.AF_INET,
+                                         socket.SOCK_DGRAM,
+                                         socket.IPPROTO_UDP)
+
+        # Bind data socket to fpga
+        self.data_socket.bind(self.data_recv)
+
         # Configure
         self.data_socket.settimeout(timeout)
 
@@ -178,6 +172,7 @@ class DCA1000:
             if byte_count % BYTES_IN_FRAME_CLIPPED == 0:
                 packets_read = 1
                 ret_frame[0:UINT16_IN_PACKET] = packet_data
+                #ret_frame[0:len(packet_data)] = packet_data
                 break
 
         # Read in the rest of the frame            
@@ -187,6 +182,7 @@ class DCA1000:
 
             if byte_count % BYTES_IN_FRAME_CLIPPED == 0:
                 self.lost_packets = PACKETS_IN_FRAME_CLIPPED - packets_read
+                self.data_socket.close()
                 return ret_frame
 
             curr_idx = ((packet_num - 1) % PACKETS_IN_FRAME_CLIPPED)
@@ -249,6 +245,27 @@ class DCA1000:
         if msg == b'5aa50a000300aaee':
             print('stopped:', msg)
 
+    def _start_stream(self):
+        """Helper function to send the start command to the FPGA
+        
+        Returns:
+            str: Response Message
+
+        """
+        # Create socket
+        self.config_socket = socket.socket(socket.AF_INET,
+                                           socket.SOCK_DGRAM,
+                                           socket.IPPROTO_UDP)
+
+        # Bind config socket to fpga
+        self.config_socket.bind(self.cfg_recv)
+
+        ret = self._send_command(CMD.RECORD_START_CMD_CODE)
+
+        self.config_socket.close()
+
+        return ret
+
     def _stop_stream(self):
         """Helper function to send the stop command to the FPGA
 
@@ -256,7 +273,19 @@ class DCA1000:
             str: Response Message
 
         """
-        return self._send_command(CMD.RECORD_STOP_CMD_CODE)
+        # Create socket
+        self.config_socket = socket.socket(socket.AF_INET,
+                                           socket.SOCK_DGRAM,
+                                           socket.IPPROTO_UDP)
+
+        # Bind config socket to fpga
+        self.config_socket.bind(self.cfg_recv)
+
+        ret = self._send_command(CMD.RECORD_STOP_CMD_CODE)
+
+        self.config_socket.close()
+
+        return ret
 
     @staticmethod
     def organize(raw_frame, num_chirps, num_rx, num_samples):
@@ -277,4 +306,5 @@ class DCA1000:
         # Separate IQ data
         ret[0::2] = raw_frame[0::4] + 1j * raw_frame[2::4]
         ret[1::2] = raw_frame[1::4] + 1j * raw_frame[3::4]
+
         return ret.reshape((num_chirps, num_rx, num_samples))
