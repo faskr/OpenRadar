@@ -11,11 +11,13 @@
 # ==============================================================================
 
 import codecs
+from curses import raw
 import socket
 import struct
 from enum import Enum
 
 import numpy as np
+from pyparsing import nums
 
 
 class CMD(Enum):
@@ -53,12 +55,12 @@ MAX_PACKET_SIZE = 4096
 BYTES_IN_PACKET = 1456
 # DYNAMIC
 BYTES_IN_FRAME = (ADC_PARAMS['chirps'] * ADC_PARAMS['rx'] * ADC_PARAMS['tx'] *
-                  ADC_PARAMS['IQ'] * ADC_PARAMS['samples'] * ADC_PARAMS['bytes'])
-BYTES_IN_FRAME_CLIPPED = (BYTES_IN_FRAME // BYTES_IN_PACKET) * BYTES_IN_PACKET
-PACKETS_IN_FRAME = BYTES_IN_FRAME / BYTES_IN_PACKET
-PACKETS_IN_FRAME_CLIPPED = BYTES_IN_FRAME // BYTES_IN_PACKET
-UINT16_IN_PACKET = BYTES_IN_PACKET // 2
-UINT16_IN_FRAME = BYTES_IN_FRAME // 2
+                  ADC_PARAMS['IQ'] * ADC_PARAMS['samples'] * ADC_PARAMS['bytes']) # 524,288
+BYTES_IN_FRAME_CLIPPED = (BYTES_IN_FRAME // BYTES_IN_PACKET) * BYTES_IN_PACKET # 524,288
+PACKETS_IN_FRAME = BYTES_IN_FRAME / BYTES_IN_PACKET # 360.088
+PACKETS_IN_FRAME_CLIPPED = BYTES_IN_FRAME // BYTES_IN_PACKET # 360
+UINT16_IN_PACKET = BYTES_IN_PACKET // 2 # 728
+UINT16_IN_FRAME = BYTES_IN_FRAME // 2 # 262,144
 
 
 class DCA1000:
@@ -143,7 +145,7 @@ class DCA1000:
         self.config_socket.close()
 
     def read(self, timeout=1):
-        """ Read in a single packet via UDP
+        """ Read in a single frame via UDP
 
         Args:
             timeout (float): Time to wait for packet before moving on
@@ -169,20 +171,25 @@ class DCA1000:
         # Wait for start of next frame
         while True:
             packet_num, byte_count, packet_data = self._read_data_packet()
+            print(byte_count)
             if byte_count % BYTES_IN_FRAME_CLIPPED == 0:
                 packets_read = 1
                 ret_frame[0:UINT16_IN_PACKET] = packet_data
                 #ret_frame[0:len(packet_data)] = packet_data
                 break
 
-        # Read in the rest of the frame            
+        # Read in the rest of the frame
         while True:
             packet_num, byte_count, packet_data = self._read_data_packet()
             packets_read += 1
+            print(packets_read)
+            print(byte_count)
 
             if byte_count % BYTES_IN_FRAME_CLIPPED == 0:
                 self.lost_packets = PACKETS_IN_FRAME_CLIPPED - packets_read
                 self.data_socket.close()
+                print(packets_read)
+                print(byte_count)
                 return ret_frame
 
             curr_idx = ((packet_num - 1) % PACKETS_IN_FRAME_CLIPPED)
@@ -192,6 +199,7 @@ class DCA1000:
                 pass
 
             if packets_read > PACKETS_IN_FRAME_CLIPPED:
+                print(packets_read)
                 packets_read = 0
 
     def _send_command(self, cmd, length='0000', body='', timeout=1):
@@ -301,10 +309,8 @@ class DCA1000:
             ndarray: Reformatted frame of raw data of shape (num_chirps, num_rx, num_samples)
 
         """
-        ret = np.zeros(len(raw_frame) // 2, dtype=complex)
-
-        # Separate IQ data
-        ret[0::2] = raw_frame[0::4] + 1j * raw_frame[2::4]
-        ret[1::2] = raw_frame[1::4] + 1j * raw_frame[3::4]
-
-        return ret.reshape((num_chirps, num_rx, num_samples))
+        raw_frame = raw_frame.astype(np.int16)
+        raw_frame = raw_frame.reshape((num_chirps, num_samples, 2, num_rx))
+        raw_frame = raw_frame[:, :, 0, :] + 1j * raw_frame[:, :, 1, :]
+        raw_frame = np.transpose(raw_frame, (0, 2, 1))
+        return raw_frame
