@@ -10,6 +10,7 @@
 # limitations under the License.
 # ==============================================================================
 
+from urllib.response import addclosehook
 import numpy as np
 
 
@@ -65,6 +66,60 @@ def parse_tsw1400(path, num_chirps_per_frame, num_frames, num_ants, num_adc_samp
     # adc_data *= normFactor
     assert adc_data.shape == (num_chirps, num_ants, num_adc_samples), \
         "ADC data is not parsed to desired shape. Currently it is {}".format(adc_data.shape)
+
+    adc_data = adc_data.reshape(num_frames, num_chirps_per_frame, num_ants, num_adc_samples)
+
+    return adc_data
+
+def parse_dca1000(path, num_chirps_per_frame, num_frames, num_ants, num_adc_samples, iq=True, num_adc_bits=16):
+    """Parse the raw ADC data based on xWR12xx/xWR14xx and DCA1000 configuration.
+
+    Parse the row-majored binary output from raw ADC data capture to numpy ndarray with the shape
+    of (numFrame, num_chirps_per_frame, num_ants, num_adc_samples). For more details, refer to the original document  
+    https://www.ti.com/lit/an/swra581b/swra581b.pdf.
+    
+    Args:
+        path (str): File path of the binary data.
+        num_chirps_per_frame (int): Total number of chirps from all transmitters in a single frame.
+        num_frames (int): Number of frames in the recorded binary data.
+        num_ants (int): Number of physical receivers.
+        num_adc_samples (int): Number of ADC samples.
+        iq (bool): True if complex and False if real.
+        num_adc_bits (int): Number of ADC quantization bits.
+    
+    Returns:
+        ndarray: Parsed ADC data with the shape of (num_frames, num_chirps_per_frame, num_ants, num_adc_samples)
+    
+    Example:
+        >>> # Suppose your binary data is located at "./data/radar_data.bin".
+        >>> adc_data = parse_tsw1400("./data/radar_data.bin", 128, 200, 4, 256)
+        >>> # Now your adc_data will be an ndarray with shape (200, 128, 4, 256) and dtype as complex.
+    """
+    channel_count = iq + 1  # always 2 in this case
+    num_chirps = num_chirps_per_frame * num_frames
+    adc_row = num_chirps * num_ants
+    adc_col = channel_count * num_adc_samples
+    num_sample = adc_row * adc_col
+
+    adc_data = np.fromfile(path, dtype=np.int16)
+    assert adc_data.shape[0] == num_sample, \
+        "Actual number of samples (%d) doesn\'t equal to expected (%d)" % (adc_data.shape[0], num_sample)
+
+    if num_adc_bits != 16:
+        l_max = 2 ** (16 - 1) - 1
+        idx_threshold = adc_data > l_max
+        adc_data[idx_threshold] -= 2 ** 16
+
+    if iq:
+        adc_data = adc_data.reshape((num_chirps, num_adc_samples, channel_count, num_ants))
+        adc_data = adc_data[:, :, 0, :] + 1j * adc_data[:, :, 1, :]
+    else:
+        adc_data = adc_data.reshape((num_chirps, num_adc_samples, num_ants))
+    adc_data = np.transpose(adc_data, (0, 2, 1))
+
+    # adc_data *= normFactor
+    #assert adc_data.shape == (num_chirps, num_ants, num_adc_samples), \
+    #    "ADC data is not parsed to desired shape. Currently it is {}".format(adc_data.shape)
 
     adc_data = adc_data.reshape(num_frames, num_chirps_per_frame, num_ants, num_adc_samples)
 
