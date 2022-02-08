@@ -56,7 +56,7 @@ BYTES_IN_PACKET = 1456
 # DYNAMIC
 BYTES_IN_FRAME = (ADC_PARAMS['chirps'] * ADC_PARAMS['rx'] * ADC_PARAMS['tx'] *
                   ADC_PARAMS['IQ'] * ADC_PARAMS['samples'] * ADC_PARAMS['bytes']) # 524,288
-BYTES_IN_FRAME_CLIPPED = (BYTES_IN_FRAME // BYTES_IN_PACKET) * BYTES_IN_PACKET # 524,288
+BYTES_IN_FRAME_CLIPPED = (BYTES_IN_FRAME // BYTES_IN_PACKET) * BYTES_IN_PACKET # 524,160
 PACKETS_IN_FRAME = BYTES_IN_FRAME / BYTES_IN_PACKET # 360.088
 PACKETS_IN_FRAME_CLIPPED = BYTES_IN_FRAME // BYTES_IN_PACKET # 360
 UINT16_IN_PACKET = BYTES_IN_PACKET // 2 # 728
@@ -143,6 +143,55 @@ class DCA1000:
         print(self._send_command(CMD.CONFIG_PACKET_DATA_CMD_CODE, '0600', 'c005350c0000'))
 
         self.config_socket.close()
+
+    def read_frames(self, leftover=[], num_frames=1, timeout=1):
+        """ Read in a single frame via UDP
+
+        Args:
+            timeout (float): Time to wait for packet before moving on
+
+        Returns:
+            Full frame as array if successful, else None
+
+        """
+        # Create socket
+        self.data_socket = socket.socket(socket.AF_INET,
+                                         socket.SOCK_DGRAM,
+                                         socket.IPPROTO_UDP)
+
+        # Bind data socket to fpga
+        self.data_socket.bind(self.data_recv)
+
+        # Configure
+        self.data_socket.settimeout(timeout)
+
+        # Frame buffer
+        uint16_preread = len(leftover)
+        packets_left = num_frames * PACKETS_IN_FRAME - uint16_preread / UINT16_IN_PACKET
+        ret_frame = np.zeros(num_frames * UINT16_IN_FRAME - uint16_preread, dtype=np.uint16)
+
+        # Read first packet and check alignment
+        packet_num, byte_count, packet_data = self._read_data_packet()
+        packets_read = 1
+        ret_frame[0:UINT16_IN_PACKET] = packet_data
+        data_start_byte = byte_count - BYTES_IN_PACKET - 2*uint16_preread
+        if (data_start_byte) % BYTES_IN_FRAME != 0:
+            print("Warning: not reading from start of a frame; data misaligned")
+
+        # Read the rest of the packets
+        data_end_byte = data_start_byte + num_frames * BYTES_IN_FRAME
+        while True:
+            packet_num, byte_count, packet_data = self._read_data_packet()
+            packets_read += 1
+            if byte_count >= data_end_byte:
+                next_frame_start = (data_end_byte - byte_count)/2
+                ret_frame[packet_num - 1] = packet_data[0:next_frame_start]
+                next_leftover = packet_data[next_frame_start:]
+                self.lost_packets = int(packets_left) + 1 - packets_read
+                self.data_socket.close()
+                return leftover + ret_frame, next_leftover
+            else:
+                ret_frame[packet_num - 1] = packet_data
 
     def read(self, timeout=1):
         """ Read in a single frame via UDP
@@ -294,6 +343,27 @@ class DCA1000:
         self.config_socket.close()
 
         return ret
+
+    @staticmethod
+    def organize_frames(raw_data, num_frames, chirps_per_frame, num_rx, samples_per_chirp, complexity):
+        """Reorganizes raw ADC data into a full set of frames
+
+        Args:
+            raw_frame (ndarray): Data to format
+            num_frames: Number of frames
+            num_chirps: Number of chirps included in the frame
+            num_rx: Number of receivers used in the frame
+            num_samples: Number of ADC samples included in each chirp
+
+        Returns:
+            ndarray: Reformatted frame of raw data of shape (num_chirps, num_rx, num_samples)
+
+        """
+        raw_data = raw_data.astype(np.int16)
+        raw_data = raw_data.reshape((num_frames, chirps_per_frame, samples_per_chirp, complexity, num_rx))
+        raw_data = raw_data[:, :, :, 0, :] + 1j * raw_data[:, :, :, 1, :]
+        raw_data = np.transpose(raw_data, (0, 1, 3, 2))
+        return raw_data
 
     @staticmethod
     def organize(raw_frame, num_chirps, num_rx, num_samples):
